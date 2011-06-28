@@ -22,6 +22,9 @@
 #include "radius.h"
 #include "md5.h"
 
+#ifndef CONFIG_PD3
+#define CONFIG_PD3
+#endif
 
 /*************************************************************************
  * Additional RADIUS definitions

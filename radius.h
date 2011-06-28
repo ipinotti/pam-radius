@@ -158,12 +158,16 @@ typedef struct pw_auth_hdr {
 #define	PW_VAN_JACOBSEN_TCP_IP		1
 
 /*	LOGIN SERVICES	*/
-
-#define	PW_TELNET			0
-#define	PW_RLOGIN			1
+#define	PW_TELNET				0
+#define	PW_RLOGIN				1
 #define	PW_TCP_CLEAR			2
 #define	PW_PORTMASTER			3
-#define PW_AUTHENTICATE_ONLY            8
+#define PW_CALLBACK_FRAMED_USER 4
+#define PW_OUTBOUND_USER		5
+#define PW_ADMINISTRATIVE_USER	6
+#define PW_NAS_PROMPT_USER		7
+#define PW_AUTHENTICATE_ONLY    8
+#define PW_CALL_CHECK			10
 
 /*	AUTHENTICATION LEVEL	*/
 

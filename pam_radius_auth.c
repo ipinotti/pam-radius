@@ -64,7 +64,70 @@
 
 #include "pam_radius_auth.h"
 
+#ifdef CONFIG_PD3
+#include <pwd.h>
+#include <grp.h>
+#endif
+
 #define DPRINT if (ctrl & PAM_DEBUG_ARG) _pam_log
+
+
+#ifdef CONFIG_PD3
+/*
+ * ########################################################################################
+ *        borrowed from librouter (pam.c)
+ *
+ * Function applied to get privilege from current system user without linking to librouter
+ *########################################################################################
+*/
+int radius_librouter_pam_get_privilege(void)
+{
+	int j, ngroups = 0, group_num = 0;
+	gid_t *groups = NULL;
+	struct passwd *my_passwd;
+	struct group *gr;
+	uid_t me;
+
+	me = getuid();
+	my_passwd = getpwuid(me);
+
+	if (!my_passwd) {
+		syslog(LOG_INFO, "Couldn't find out about user %d.\n", (int) me);
+		return -1;
+	}
+
+	/* Retrieve number of groups */
+	getgrouplist(my_passwd->pw_name, my_passwd->pw_gid, groups, &ngroups);
+
+	/* Reserving memory for the N groups */
+	groups = malloc(ngroups * sizeof(gid_t));
+	if (groups == NULL) {
+		syslog(LOG_INFO, "Couldn't reserve memory for find out about user %d.\n", (int) me);
+		return -1;
+	}
+
+	/* Retrieve group list */
+	if (getgrouplist(my_passwd->pw_name, my_passwd->pw_gid, groups, &ngroups) < 0)
+		return -1;
+
+	/* Retrieve the group number of the user */
+	for (j = 0; j < ngroups; j++) {
+		group_num = (int) groups[j];
+		gr = getgrgid(groups[j]);
+		if (gr != NULL) {
+			if (strstr(gr->gr_name, "priv"))
+				goto end_priv;
+		}
+	}
+
+	free(groups);
+	return 0;
+
+	end_priv: free(groups);
+	return group_num;
+
+}
+#endif
 
 /* internal data */
 static CONST char *pam_module_name = "pam_radius_auth";
@@ -130,9 +193,9 @@ static int _pam_parse(int argc, CONST char **argv, radius_conf_t *conf)
 
     } else if (!strncmp(*argv, "client_id=", 10)) {
       if (conf->client_id) {
-	_pam_log(LOG_WARNING, "ignoring duplicate '%s'", *argv);
+    	  _pam_log(LOG_WARNING, "ignoring duplicate '%s'", *argv);
       } else {
-	conf->client_id = (char *) *argv+10; /* point to the client-id */
+    	  conf->client_id = (char *) *argv+10; /* point to the client-id */
       }
     } else if (!strcmp(*argv, "accounting_bug")) {
       conf->accounting_bug = TRUE;
@@ -939,6 +1002,12 @@ send:
 	  if (!verify_packet(p, response, request)) {
 	    _pam_log(LOG_ERR, "packet from RADIUS server %s fails verification: The shared secret is probably incorrect.",
 		     server->hostname);
+#ifdef CONFIG_PD3
+/*
+ * Hack para atribuir PAM_AUTH_ERR ao response->CODE, retornando login error ao tinylogin e negando authenticação, quando radius secret esta errado
+ */
+	    response->code = PAM_AUTH_ERR;
+#endif
 	    ok = FALSE;
 	    break;
 	  }
@@ -1008,8 +1077,19 @@ send:
     _pam_log(LOG_ERR, "All RADIUS servers failed to respond.");
     if (conf->localifdown)
       retval = PAM_IGNORE;
+#ifdef CONFIG_PD3
+/*
+ * Hack para forçar TALK_RADIUS a retornar PAM_SUCCESS se detectado radius secret errado
+ */
     else
-      retval = PAM_AUTHINFO_UNAVAIL;
+    	if (response->code == PAM_AUTH_ERR)
+    		retval = PAM_SUCCESS;
+    	else
+    		retval = PAM_AUTHINFO_UNAVAIL;
+#else
+    else
+		retval = PAM_AUTHINFO_UNAVAIL;
+#endif
   } else {
     retval = PAM_SUCCESS;
   }
@@ -1081,11 +1161,21 @@ pam_sm_authenticate(pam_handle_t *pamh,int flags,int argc,CONST char **argv)
   CONST char *user;
   CONST char **userinfo;
   char *password = NULL;
-  CONST char *rhost;
+  CONST char *rhost = NULL;
   char *resp2challenge = NULL;
   int ctrl;
   int retval = PAM_AUTH_ERR;
 
+#ifdef CONFIG_PD3
+/*
+ * Adicionando variaveis para che vita è e quanta ne restaatribuir ao pacote radius o hostname e user ENABLE
+ */
+  char hostname[64];
+  char enabl_priv[12];
+  int priv = 0;
+  memset(&hostname, 0, sizeof(hostname));
+  memset(&enabl_priv, 0, sizeof(enabl_priv));
+#endif
 
   char recv_buffer[4096];
   char send_buffer[4096];
@@ -1109,6 +1199,21 @@ pam_sm_authenticate(pam_handle_t *pamh,int flags,int argc,CONST char **argv)
     DPRINT(LOG_DEBUG, "User name was NULL, or too long");
     return PAM_USER_UNKNOWN;
   }
+
+#ifdef CONFIG_PD3
+/*
+ * Hack para modificar o user ENABLE ($enable$) concatenando o privilegio do usuario
+ */
+  if (!strcmp("$enable$",user)){
+	  if ((priv = radius_librouter_pam_get_privilege()) == 0){
+		  priv = 15;
+	  }
+	  snprintf(enabl_priv,sizeof(enabl_priv),"$enab%d$",priv);
+	  user = enabl_priv;
+	  DPRINT(LOG_DEBUG, "User (ENABLE) setted concating the privilege: %s\n",  user );
+  }
+#endif
+
   DPRINT(LOG_DEBUG, "Got user name %s", user);
 
   if (ctrl & PAM_RUSER_ARG) {
@@ -1135,10 +1240,24 @@ pam_sm_authenticate(pam_handle_t *pamh,int flags,int argc,CONST char **argv)
    * If there's no client id specified, use the service type, to help
    * keep track of which service is doing the authentication.
    */
+
+#ifdef CONFIG_PD3
+  /*
+   * Hack para adicionar no campo client_id (AVP Nas-Identifier) enviado ao servidor radius, a string de hostname.
+   */
+  if (!config.client_id) {
+	  retval = gethostname((char*)&hostname, sizeof(hostname) - 1);
+	  PAM_FAIL_CHECK;
+	  config.client_id = hostname;
+	  DPRINT(LOG_DEBUG, "Client id setted by hostname: %s\n",  config.client_id );
+  }
+#else
   if (!config.client_id) {
     retval = pam_get_item(pamh, PAM_SERVICE, (CONST void **) &config.client_id);
     PAM_FAIL_CHECK;
   }
+#endif
+
 
   /* now we've got a socket open, so we've got to clean it up on error */
 #undef PAM_FAIL_CHECK
@@ -1174,9 +1293,35 @@ pam_sm_authenticate(pam_handle_t *pamh,int flags,int argc,CONST char **argv)
   } /* end of password == NULL */
 
   build_radius_packet(request, user, password, &config);
-  /* not all servers understand this service type, but some do */
-  add_int_attribute(request, PW_USER_SERVICE_TYPE, PW_AUTHENTICATE_ONLY);
 
+#ifdef CONFIG_PD3
+  /*Hack para enviar no campo (Service_type), a string "Administrative-User" --> (codigo 6 do pacote radius),
+   * quando utilizado autenticação para ENABLE*/
+  /* not all servers understand this service type, but some do */
+  if (strstr(user,"$enab"))
+	  add_int_attribute(request, PW_USER_SERVICE_TYPE, PW_ADMINISTRATIVE_USER);
+  else
+	  add_int_attribute(request, PW_USER_SERVICE_TYPE, PW_AUTHENTICATE_ONLY);
+#else
+  /* not all servers understand this service type, but some do */
+   add_int_attribute(request, PW_USER_SERVICE_TYPE, PW_AUTHENTICATE_ONLY);
+#endif
+
+#ifdef CONFIG_PD3
+  /*
+   * Hack para adicionar no campo (AVP Calling-Station ID) enviado ao servidor radius, o IP do proprio servidor radius em questao.
+   */
+  if (config.server->hostname){
+	  rhost = config.server->hostname;
+  	  retval = PAM_SUCCESS;
+  }
+
+  PAM_FAIL_CHECK;
+  if (rhost) {
+    add_attribute(request, PW_CALLING_STATION_ID, (unsigned char *) rhost,
+		  strlen(rhost));
+  }
+#else
   /*
    *  Tell the server which host the user is coming from.
    *
@@ -1184,16 +1329,18 @@ pam_sm_authenticate(pam_handle_t *pamh,int flags,int argc,CONST char **argv)
    *  It's the IP address of the client.
    */
   retval = pam_get_item(pamh, PAM_RHOST, (CONST void **) &rhost);
-  PAM_FAIL_CHECK;
-  if (rhost) {
-    add_attribute(request, PW_CALLING_STATION_ID, (unsigned char *) rhost,
-		  strlen(rhost));
-  }
+   PAM_FAIL_CHECK;
+   if (rhost) {
+     add_attribute(request, PW_CALLING_STATION_ID, (unsigned char *) rhost,
+ 		  strlen(rhost));
+   }
+#endif
 
   DPRINT(LOG_DEBUG, "Sending RADIUS request code %d", request->code);
 
   retval = talk_radius(&config, request, response, password,
                        NULL, config.retries + 1);
+
   PAM_FAIL_CHECK;
 
   DPRINT(LOG_DEBUG, "Got RADIUS response code %d", response->code);
@@ -1274,6 +1421,7 @@ error:
     *pret = retval;
     pam_set_data( pamh, "rad_setcred_return", (void *) pret, _int_free );
   }
+
   return retval;
 }
 
