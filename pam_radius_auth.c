@@ -1301,7 +1301,7 @@ pam_sm_authenticate(pam_handle_t *pamh,int flags,int argc,CONST char **argv)
   if (strstr(user,"$enab"))
 	  add_int_attribute(request, PW_USER_SERVICE_TYPE, PW_ADMINISTRATIVE_USER);
   else
-	  add_int_attribute(request, PW_USER_SERVICE_TYPE, PW_AUTHENTICATE_ONLY);
+	  add_int_attribute(request, PW_USER_SERVICE_TYPE, PW_RLOGIN);
 #else
   /* not all servers understand this service type, but some do */
    add_int_attribute(request, PW_USER_SERVICE_TYPE, PW_AUTHENTICATE_ONLY);
